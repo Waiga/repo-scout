@@ -77,8 +77,13 @@ class ProjectDocsTests(unittest.TestCase):
     def test_readme_keeps_its_verification_and_adoption_disclosures(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-        self.assertIn("Python 3.14 only", readme)
-        self.assertIn("has not run", readme)
+        # The point of this test is that honest limitations cannot be quietly
+        # deleted. When a limitation stops being true it is REPLACED here by the
+        # one that succeeded it, never simply dropped. The matrix has now run, so
+        # "Python 3.14 only" and "has not run" are gone; what remains unverified
+        # is everything the matrix does not cover.
+        self.assertIn("no upper", readme)
+        self.assertIn("Windows is untested", readme)
         self.assertIn("no adoption or contribution history", readme)
 
 

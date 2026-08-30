@@ -100,11 +100,11 @@ from a checkout or a repository archive.
 Repo Scout is version 0.1.0 and early alpha. Commands, scoring weights, and report
 output can change without a deprecation period.
 
-Verification to date has been performed on Python 3.14 only. The declared range in
-`pyproject.toml` is Python 3.11 or newer, and the test matrix in
-`.github/workflows/ci.yml` covers Python 3.11 to 3.14, but that workflow has not run,
-so no other version has been confirmed by an automated check. Treat versions other than
-the one you test on as unverified.
+The test matrix in `.github/workflows/ci.yml` covers Python 3.11, 3.12, 3.13 and 3.14 on
+Linux, and the suite passes on all four. Development and manual verification also happen
+on macOS. The declared range in `pyproject.toml` is Python 3.11 or newer with no upper
+bound, so versions above 3.14 are unverified, and Windows is untested. Treat any
+combination the matrix does not cover as unverified.
 
 There is no published release and no adoption or contribution history to report.
 Maintenance is best effort by a single maintainer working in a weekly review block, with
