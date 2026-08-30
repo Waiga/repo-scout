@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repo-scout"
+version = "0.1.0"
+description = "Inspect public repositories for usefulness and static risk evidence before adoption."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Waiga Arya" }]
+keywords = ["github", "static-analysis", "developer-tools", "ai-tools"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
+
+[project.scripts]
+repo-scout = "repo_scout.cli:main"
+
+[tool.setuptools]
+packages = ["repo_scout"]

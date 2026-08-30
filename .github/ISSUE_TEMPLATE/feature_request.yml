@@ -1,0 +1,24 @@
+name: Feature request
+description: Describe an evidence-backed user problem before proposing a solution
+title: "[Feature]: "
+labels: ["enhancement", "needs-evidence"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Explain the decision or workflow that currently fails.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Public or synthetic evidence
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: What should remain outside scope?
+    validations:
+      required: true

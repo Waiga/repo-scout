@@ -1,0 +1,8 @@
+.repo-scout-cache/
+downloads/
+reports/
+__pycache__/
+*.pyc
+build/
+dist/
+*.egg-info/
