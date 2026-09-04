@@ -52,7 +52,7 @@ class GitHubClient:
         request = self._request(url)
         try:
             with self.opener(request) as response:
-                return json.loads(response.read().decode("utf-8"))
+                payload = json.loads(response.read().decode("utf-8"))
         except (
             OSError,
             urllib.error.URLError,
@@ -61,6 +61,15 @@ class GitHubClient:
             UnicodeDecodeError,
         ) as exc:
             raise GitHubClientError(f"public GitHub request failed: {exc}") from exc
+        # Every caller reads fields out of an object. A body that parses and is
+        # not one - an error page, a proxy's reply, a bare list - is a failed
+        # request, not a repository, and is reported as one rather than reaching
+        # `.get` and raising AttributeError.
+        if not isinstance(payload, dict):
+            raise GitHubClientError(
+                "public GitHub request failed: response body was not a JSON object"
+            )
+        return payload
 
     @staticmethod
     def _request(url: str) -> urllib.request.Request:

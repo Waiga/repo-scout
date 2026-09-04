@@ -1,7 +1,10 @@
+import io
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
 
 from repo_scout.cache import FileCache
@@ -13,6 +16,7 @@ from repo_scout.cli import (
     run_search_command,
 )
 from repo_scout.github_client import GitHubClientError
+from repo_scout.models import FileFetch, RepoSummary
 
 
 class FailingClient:
@@ -149,6 +153,48 @@ class CliErrorTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         which.assert_called_once_with("git")
+
+    def test_scan_reports_an_unreadable_directory_instead_of_crashing(self):
+        # `_local_signals` calls `path.iterdir()`, which raises PermissionError
+        # on a directory the process cannot read. The download failures already
+        # exit 1 with a message; this one exited with a traceback.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            reports = root / "reports"
+            repo.chmod(0o000)
+            try:
+                if os.access(repo, os.R_OK):
+                    self.skipTest("this process can read a directory with no permissions")
+                terminal = io.StringIO()
+                with redirect_stdout(terminal):
+                    code = run_scan_command(repo, reports)
+            finally:
+                repo.chmod(0o700)
+
+        self.assertEqual(code, 1)
+        self.assertIn("could not be read", terminal.getvalue())
+        self.assertFalse(reports.exists())
+
+    def test_unreadable_cache_entry_is_a_miss_not_a_crash(self):
+        # The cache is files on the user's disk. A truncated write, a hand edit
+        # or an entry written by an older field set parses as JSON and then does
+        # not fit the dataclasses. A cache is an optimisation, so the command
+        # must fall back to the client rather than fail.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = FileCache(root / "cache")
+            cache.set("inspect:v2:owner/repo", {"repo": "not a mapping"})
+            client = Mock()
+            client.get_repo.return_value = RepoSummary("owner/repo", "", "https://x")
+            client.fetch_text_file.return_value = FileFetch("unknown")
+
+            with redirect_stdout(io.StringIO()):
+                code = run_inspect_command("owner/repo", client, root / "reports", cache)
+
+        self.assertEqual(code, 0)
+        client.get_repo.assert_called_once_with("owner/repo")
 
 
 if __name__ == "__main__":

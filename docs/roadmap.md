@@ -29,28 +29,68 @@ small, self-contained, and a reasonable first contribution.
    `requires-python = ">=3.11"` with no upper bound, while the classifiers and the
    workflow matrix stop at 3.14. The project therefore advertises support for versions
    nothing exercises.
-6. **A local scan claims a query match when no query was given.** `scan` and `report`
-   take no query, but `repo_scout/cli.py:158` passes the scanned directory's name to
-   `score_repository` as the search query. `repo_scout/scoring.py:106` then matches that
-   name against the repository name it was taken from, relevance comes out at 1.0, and
-   every local scan opens its evidence list with `Matches query terms in name or
-   description` and collects the relevance points behind it. The line appears in the
-   README's offline worked example, which is the first output a new user sees. Deciding
-   what an unqueried scan should score is the substance of the fix; the reported evidence
-   line and the score must agree with whatever is chosen.
+6. **`contributor_count` is never populated.** `RepoSignals` carries the field and
+   `repo_scout.scoring` gives it a fifth of the credibility component, but no V0.1
+   command fetches it: `search` builds an empty `RepoSignals`, `_fetch_signals` does not
+   set it, and a local scan has no contributor list to read. It is therefore always
+   unknown, which now widens the usefulness ceiling instead of silently subtracting
+   points, but the underlying gap is that the GitHub contributors endpoint is not
+   called. Populating it where the data is genuinely available is a self-contained
+   change.
+7. **`USE` is unreachable through any V0.1 command.** The label needs a query, which
+   only `search` takes, and an established low risk, which only a static scan produces.
+   No command does both: `search` and `inspect` open no file, so risk stays unknown,
+   while `scan` and `report` take no query, so relevance is not scored and the confirmed
+   figure tops out at the remaining 70. The README states this under Verdicts. The
+   thresholds are deliberately **not re-tuned** to make the label reachable: lowering the
+   bar would award `USE` on evidence no command gathered, which is the defect the
+   withheld verdict was added to remove. The fix is a command that runs a query and a
+   static scan over the same repository, so the label rests on more evidence rather than
+   on a shorter scale.
 
 ## Closed in V0.1
 
 These were listed above and have since been fixed. They are kept so the record is
 honest rather than silently tidied.
 
+- **A local scan claimed a query match when no query was given.** `scan`, `report` and
+  `inspect` take no query, yet each passed a name back into `score_repository` as one, so
+  relevance came out at 1.0 and every report opened its evidence list with `Matches query
+  terms in name or description`. Relevance is now skipped, not scored, when there is no
+  query, and the line is gone. The 30 relevance points are unavailable to those commands
+  as a result: an unqueried report is scored out of the remaining 70, which is under the
+  75 `USE` requires. The README no longer quotes that ceiling; it explains the verdict
+  gate under Verdicts, and gap 7 above owns the unreachable label.
+- **Every local scan returned `AVOID`.** `scan` and `report` could produce no other
+  verdict for any input, including a directory with a README, a LICENSE, package
+  metadata, tests and a CI workflow and no static findings. Relevance needs a query,
+  credibility needs published repository metadata, and freshness and releases need a
+  push date and a release list, so the reachable local total sat under the 50-point
+  `AVOID` threshold. A local scan is no longer scored on axes only GitHub can answer,
+  and a verdict is now emitted only when the confirmed usefulness figure and the ceiling
+  fall under the same label. Where they do not, the report says the verdict is not
+  established and names the reasons for that run, in the Markdown file, the HTML file
+  and the terminal.
 - **Automated checks tested the working tree, not the installed package.**
   `.github/workflows/ci.yml` now runs the installed console script from a neutral
-  working directory after installing. That workflow has not run, so this is a
-  change to the definition rather than a demonstrated result.
-- **The packaging ignore test covered only three of the eight ignore patterns.**
-  `tests/test_package_metadata.py` now asserts all eight by asking `git check-ignore`
-  rather than matching strings, so an appended negation cannot weaken the contract.
+  working directory after installing. That workflow ran on GitHub Actions against the
+  published v0.1 tree, commit `a14de73` of 30 August 2026, and passed on Python 3.11,
+  3.12, 3.13 and 3.14 on Linux. That run, and the result for any later commit, is
+  recorded in the repository's Actions history rather than in a checkout, which carries
+  the workflow definition and not its results.
+- **The packaging ignore test covered the rules and never the index.** It began by
+  matching three of the ignore patterns as strings;
+  `tests/test_package_metadata.py` now asks `git check-ignore` about every pattern
+  `.gitignore` declares, so an appended negation cannot weaken the contract. That is
+  still only the rule, and a rule does not untrack a file already in the index: four
+  private local planning files were tracked from before the pattern existed, and the
+  pattern probe could not see them. They are untracked, and a second check asks
+  `git ls-files` directly whether anything under a private-material pattern is
+  tracked in the current index, which is the outcome rather than the rule. That
+  check answers for the index only, at the moment it runs: the four documents it was
+  written after finding remain, permanently, in the ancestor commits that first
+  tracked them, and passing it never means this history is safe to push. Publishing
+  this project assembles a fresh clean tree instead of pushing this history.
 - **The suite failed outside a Git working tree.** Running it from a repository archive
   gave eight errors, because the ignore contract asks `git check-ignore` and there is no
   working tree to answer. It now skips that one check with a reason, and still fails when

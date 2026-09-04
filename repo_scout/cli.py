@@ -9,7 +9,7 @@ from pathlib import Path
 from .cache import FileCache
 from .github_client import GitHubClient, GitHubClientError
 from .models import EvidenceState, RepoReport, RepoSignals, RepoSummary
-from .report import write_report
+from .report import LIMITATION, risk_text, usefulness_text, verdict_text, write_report
 from .scanner import scan_path
 from .scoring import score_repository
 
@@ -30,7 +30,16 @@ def _valid_repo_name(value: str) -> bool:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="repo-scout")
+    parser = argparse.ArgumentParser(
+        prog="repo-scout",
+        description=(
+            "Report static evidence about a public GitHub repository or a local "
+            "directory. Repo Scout does not prove that a repository is safe or "
+            "infected: it reports what it observed and what it could not "
+            "establish, and its verdicts are prioritization labels for human "
+            "review."
+        ),
+    )
     parser.add_argument(
         "--reports-dir",
         default=str(DEFAULT_REPORTS),
@@ -47,7 +56,13 @@ def build_parser() -> argparse.ArgumentParser:
     inspect = sub.add_parser("inspect", help="Inspect one public GitHub repository")
     inspect.add_argument("repo")
 
-    download = sub.add_parser("download", help="Clone a repo into quarantine downloads directory")
+    download = sub.add_parser(
+        "download",
+        help=(
+            "Clone a repo into the downloads directory (quarantine by location "
+            "only: kept apart on disk, not sandboxed)"
+        ),
+    )
     download.add_argument("repo")
     download.add_argument(
         "--downloads-dir",
@@ -55,10 +70,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"directory to clone into (default: {DEFAULT_DOWNLOADS})",
     )
 
-    scan = sub.add_parser("scan", help="Static-scan a local repository path")
+    scan = sub.add_parser(
+        "scan",
+        help="Static-scan a local repository path and write Markdown and HTML reports",
+    )
     scan.add_argument("path")
 
-    report = sub.add_parser("report", help="Alias for scan that writes report files")
+    report = sub.add_parser(
+        "report",
+        help="Same as scan, under a second name; both write the same report files",
+    )
     report.add_argument("path")
 
     return parser
@@ -89,12 +110,35 @@ def run_search_command(query: str, limit: int, client: GitHubClient) -> int:
         print(f"Search failed: {exc}")
         print("No-token mode depends on public GitHub access from this Python environment.")
         return 1
-    for index, repo in enumerate(repos, start=1):
-        signals = RepoSignals()
-        score = score_repository(repo, signals, [], query)
-        print(f"{index}. {repo.full_name}  useful {score.usefulness}/100  risk {score.risk}/100  {score.verdict}")
+    scored = [(repo, score_repository(repo, RepoSignals(), [], query)) for repo in repos]
+
+    # `search` opens no file and fetches no signal, so its risk and verdict
+    # lines say the same two things about every result: no scan ran, and no
+    # label was established. Printed per row they are two thirds of the listing
+    # and they bury the usefulness figure, which is the part that varies.
+    #
+    # Whether they are really identical is checked rather than assumed. The
+    # header is printed only when every result produced the same pair, and any
+    # run where they differ falls back to printing them per row, so hoisting
+    # can never turn one result's answer into a claim about the rest.
+    shared = {(risk_text(score), verdict_text(score)) for _repo, score in scored}
+    header = shared.pop() if len(shared) == 1 else None
+
+    if header is not None:
+        risk, verdict = header
+        print(f"Risk: {risk}")
+        print(f"Verdict: {verdict}")
+        print("Both are the same for every result below; usefulness is what varies.")
+        print()
+
+    for index, (repo, score) in enumerate(scored, start=1):
+        print(f"{index}. {repo.full_name}")
         if repo.description:
             print(f"   {repo.description}")
+        print(f"   Usefulness: {usefulness_text(score)}")
+        if header is None:
+            print(f"   Risk: {risk_text(score)}")
+            print(f"   Verdict: {verdict_text(score)}")
     return 0
 
 
@@ -103,10 +147,9 @@ def run_inspect_command(repo_name: str, client: GitHubClient, reports_dir: Path,
         print("Repository must use the OWNER/REPO form.")
         return 2
     cache_key = f"inspect:v2:{repo_name}"
-    cached = cache.get(cache_key)
-    if cached:
-        repo = RepoSummary(**cached["repo"])
-        signals = RepoSignals(**cached["signals"])
+    cached = _cached_evidence(cache.get(cache_key))
+    if cached is not None:
+        repo, signals = cached
     else:
         try:
             repo = client.get_repo(repo_name)
@@ -115,13 +158,33 @@ def run_inspect_command(repo_name: str, client: GitHubClient, reports_dir: Path,
             return 1
         signals = _fetch_signals(client, repo)
         cache.set(cache_key, {"repo": repo.__dict__, "signals": signals.__dict__})
-    score = score_repository(repo, signals, [], repo_name)
+    # No query: `inspect` names one repository rather than searching for one.
+    # Passing `repo_name` here matched the repository's name against itself and
+    # reported a query match nobody asked for.
+    score = score_repository(repo, signals, [])
     report = RepoReport(repo=repo, signals=signals, findings=[], score=score)
     md_path, html_path = write_report(report, reports_dir)
     print_summary(report)
     print(f"Report: {md_path}")
     print(f"HTML: {html_path}")
     return 0
+
+
+def _cached_evidence(cached: object) -> tuple[RepoSummary, RepoSignals] | None:
+    """Rebuild a cached entry, or `None` when it cannot be used.
+
+    The cache is a directory of files on the user's disk. A truncated write, a
+    hand edit, or an entry written by an older set of fields all parse as JSON
+    and then do not fit the dataclasses. A cache is an optimisation, so an entry
+    that cannot be rebuilt is treated as a miss and the evidence is fetched
+    again, rather than ending the command in a TypeError or a KeyError.
+    """
+    if not isinstance(cached, dict):
+        return None
+    try:
+        return RepoSummary(**cached["repo"]), RepoSignals(**cached["signals"])
+    except (AttributeError, KeyError, TypeError):
+        return None
 
 
 def run_download_command(repo_name: str, downloads_dir: Path) -> int:
@@ -143,7 +206,8 @@ def run_download_command(repo_name: str, downloads_dir: Path) -> int:
     except subprocess.CalledProcessError:
         print(f"Download failed: {repo_name}")
         return 1
-    print(f"Downloaded to quarantine: {destination}")
+    print(f"Downloaded to the quarantine directory: {destination}")
+    print("Quarantine is by location only: the clone is kept apart on disk, not sandboxed.")
     print("No repository code was executed.")
     return 0
 
@@ -153,9 +217,26 @@ def run_scan_command(path: Path, reports_dir: Path) -> int:
         print(f"Scan path is not a directory: {path}")
         return 2
     repo = _local_repo_summary(path)
-    signals = _local_signals(path)
-    findings = scan_path(path)
-    score = score_repository(repo, signals, findings, path.name)
+    try:
+        signals = _local_signals(path)
+        findings = scan_path(path)
+    except OSError as exc:
+        # `_local_signals` calls `path.iterdir()` and the scanner walks the tree,
+        # so a directory the process cannot read, or one that disappears mid
+        # scan, raises here. Reported the way the download failures are, rather
+        # than as a traceback, and no report is written for a scan that did not
+        # happen.
+        print(f"Scan path could not be read: {path} ({exc.strerror or exc})")
+        return 1
+    # No query: `scan` and `report` take a path, not search terms. Passing
+    # `path.name` here matched the directory name against the name taken from
+    # it and reported a query match nobody asked for.
+    # `metadata=False`: the summary above was built from a directory, so its
+    # star, fork, open-issue and push-date fields are placeholders rather than
+    # anything that was read. Scoring them held every local scan below the AVOID
+    # threshold and reported that ceiling as a property of the scanned
+    # repository.
+    score = score_repository(repo, signals, findings, scanned=True, metadata=False)
     report = RepoReport(repo=repo, signals=signals, findings=findings, score=score)
     md_path, html_path = write_report(report, reports_dir)
     print_summary(report)
@@ -166,11 +247,12 @@ def run_scan_command(path: Path, reports_dir: Path) -> int:
 
 def print_summary(report: RepoReport) -> None:
     print(f"{report.repo.full_name}")
-    print(f"Usefulness: {report.score.usefulness}/100")
-    print(f"Risk: {report.score.risk}/100")
-    print(f"Verdict: {report.score.verdict}")
+    print(f"Usefulness: {usefulness_text(report.score)}")
+    print(f"Risk: {risk_text(report.score)}")
+    print(f"Verdict: {verdict_text(report.score)}")
     for reason in report.score.reasons[:5]:
         print(f"- {reason}")
+    print(LIMITATION)
 
 
 def _fetch_signals(client: GitHubClient, repo: RepoSummary) -> RepoSignals:

@@ -49,8 +49,9 @@ jobs:
 
 # Every pattern `.gitignore` declares, paired with a path that only that pattern
 # can ignore. The first five keep scan output, cached API responses and cloned
-# third-party code out of a repository being prepared for publication; the last
-# three keep local build artifacts out. Order matches the file, because the
+# third-party code out of a repository being prepared for publication; the next
+# three keep local build artifacts out; the last two keep private planning
+# material out of the same repository. Order matches the file, because the
 # completeness check below compares the two directly.
 IGNORE_CONTRACT = (
     (".repo-scout-cache/", ".repo-scout-cache/probe.json"),
@@ -61,7 +62,63 @@ IGNORE_CONTRACT = (
     ("build/", "build/probe.txt"),
     ("dist/", "dist/probe.txt"),
     ("*.egg-info/", "repo_scout.egg-info/PKG-INFO"),
+    (".superpowers/", ".superpowers/probe.json"),
+    ("docs/superpowers/", "docs/superpowers/probe.md"),
 )
+
+
+# The heading in `.gitignore` above the patterns that exist to keep private
+# material out of a public repository. The patterns are read from under it
+# rather than listed here so that a third such pattern, added to that section,
+# is guarded the moment it is written. Reading the heading selects WHICH
+# prefixes to interrogate; it never answers whether anything is tracked. That
+# answer comes from `git ls-files`, and from nothing else.
+PRIVATE_MATERIAL_HEADING = "# Private local planning material"
+
+
+def private_material_patterns():
+    """The `.gitignore` patterns declared under the private-material heading.
+
+    Scope: this reads patterns filed under `PRIVATE_MATERIAL_HEADING` only. A
+    private pattern later added under a *different* heading is invisible here
+    and to the index check that consumes this list: it would still gain a
+    pattern probe, forced by `test_every_declared_ignore_pattern_is_guarded`,
+    but no index check -- silently. This generalises within one heading, not
+    across headings.
+    """
+    lines = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    patterns = []
+    in_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            in_section = stripped.startswith(PRIVATE_MATERIAL_HEADING)
+            continue
+        if in_section and stripped:
+            patterns.append(stripped)
+    return patterns
+
+
+def tracked_paths(pathspec=None):
+    """Every path Git actually has in the index, optionally narrowed.
+
+    This is the real index, not a question about a path that might one day be
+    added to it. `git check-ignore --no-index` answers about a hypothetical
+    path and therefore cannot see a file that is already tracked; an ignore
+    rule never untracks anything. So the outcome is asked of `git ls-files`
+    directly, with no parsing of `.gitignore` and no probe standing in for a
+    real file.
+    """
+    command = ["git", "ls-files", "-z"]
+    if pathspec is not None:
+        command += ["--", pathspec]
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise AssertionError(
+            f"git ls-files could not answer for {pathspec!r} "
+            f"(exit {result.returncode}): {result.stderr.strip()}"
+        )
+    return [path for path in result.stdout.split("\0") if path]
 
 
 def working_tree_skip_reason():
@@ -169,6 +226,79 @@ class PackageMetadataTests(unittest.TestCase):
                 self.assertEqual(source, ".gitignore", f"{probe} ignored by {source!r}")
                 self.assertEqual(matched, pattern)
 
+    def test_no_private_material_is_tracked_in_git(self):
+        # The OUTCOME, not the rule. `.gitignore` naming a directory proves
+        # nothing about the index: a file added before the pattern existed
+        # stays tracked. The pattern probes above cannot see that, by
+        # construction, because `--no-index` is what makes them answer at
+        # all. This asks Git for the index it really has.
+        #
+        # Scope, stated precisely, because getting this wrong once already
+        # tracked four private documents into history: this checks only
+        # HEAD's index, right now. It does not, and cannot, check history. A
+        # commit that already tracked a private path keeps it forever, in
+        # that commit, no matter what the index looks like today -- Git does
+        # not forget, and there is no rewrite here to make it. So a pass below
+        # means exactly "no private-material path is tracked in the index at
+        # this moment" and nothing more. It is NOT evidence that this
+        # history is safe to push, and it never will be: the four documents
+        # this guard was written after finding remain, permanently, in the
+        # ancestor commits that tracked them. Publishing this project means
+        # assembling a fresh clean tree and pushing that, never this history.
+        reason = working_tree_skip_reason()
+        if reason is not None:
+            self.skipTest(reason)
+
+        index = tracked_paths()
+
+        # A broken query returns an empty list, which would make every
+        # assertion below pass while checking nothing. Anchor on a file that
+        # must be tracked, so "no private material" cannot mean "no answer".
+        self.assertIn(
+            "pyproject.toml",
+            index,
+            "git ls-files did not return the tracked project files, so this "
+            "check has no evidence; fix the query before trusting the result",
+        )
+
+        patterns = private_material_patterns()
+        self.assertNotEqual(
+            patterns,
+            [],
+            f"no patterns found under {PRIVATE_MATERIAL_HEADING!r} in "
+            ".gitignore; the private-material section must not be renamed or "
+            "removed while this guard depends on it",
+        )
+
+        for pattern in patterns:
+            with self.subTest(pattern=pattern):
+                matched = tracked_paths(pattern)
+
+                self.assertEqual(
+                    matched,
+                    [],
+                    f"{len(matched)} file(s) under the private pattern "
+                    f"{pattern!r} are tracked in the current index (git "
+                    "ls-files); untrack them with `git rm --cached` (the "
+                    "files stay on disk). Untracking fixes the index only -- "
+                    "it says nothing about any commit that already tracked "
+                    "these files, which keeps them forever. Never push this "
+                    "history; publish by assembling a fresh clean tree "
+                    "instead: " + ", ".join(matched),
+                )
+
+                if pattern.endswith("/"):
+                    # Second, blunter reading of the same index that does not
+                    # depend on how Git interprets a pathspec.
+                    prefix = pattern
+                    under = [path for path in index if path.startswith(prefix)]
+
+                    self.assertEqual(
+                        under,
+                        [],
+                        f"tracked paths under {prefix!r}: " + ", ".join(under),
+                    )
+
     def test_ci_workflow_matches_the_pinned_contract(self):
         # `python -m unittest` puts the process working directory at
         # `sys.path[0]`, so a suite run from the checkout imports the working
@@ -179,8 +309,9 @@ class PackageMetadataTests(unittest.TestCase):
         # This is a tripwire, not a workflow analyser. ANY edit to the workflow
         # fails it on purpose, including a correct one: the fix is to update
         # `EXPECTED_WORKFLOW` in the same commit, and the failure prints the
-        # diff. It cannot see anything that happens on a runner, because this
-        # workflow has never run.
+        # diff. It cannot see anything that happens on a runner: the matrix ran
+        # against the published v0.1 tree, commit `a14de73`, and that result is
+        # checkable in the published repository's Actions history, not here.
         actual = (ROOT / WORKFLOW).read_text(encoding="utf-8")
 
         self.assertEqual(

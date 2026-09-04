@@ -42,6 +42,19 @@ class UnavailableOpener:
 
 
 class GitHubClientTests(unittest.TestCase):
+    def test_non_object_json_body_is_a_client_error_not_a_crash(self):
+        # A body that parses but is not an object still fails every caller:
+        # `search_repositories` calls `.get` on it and `get_repo` reads fields
+        # out of it. A proxy or an error page can produce one, and it belongs
+        # with the other transport failures rather than as an AttributeError.
+        client = GitHubClient(opener=lambda request: FakeResponse(b'["not an object"]'))
+
+        with self.assertRaises(GitHubClientError):
+            client.search_repositories("codex plugin")
+        with self.assertRaises(GitHubClientError):
+            client.get_repo("owner/repo")
+
+
     def test_search_repositories_maps_summary_fields(self):
         payload = {
             "items": [

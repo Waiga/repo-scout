@@ -14,4 +14,6 @@ Repo Scout has five focused stages:
 
 Data flows in one direction from collection to evidence states, scoring, and reports.
 An unavailable source remains `unknown`. Collection failures do not become negative
-facts. Downloaded repositories are never imported or executed by Repo Scout.
+facts. A report records whether a static scan contributed to it, so a command that opens
+no file reports risk as unknown instead of reporting no findings. Downloaded repositories
+are never imported or executed by Repo Scout.

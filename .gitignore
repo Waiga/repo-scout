@@ -6,3 +6,7 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+
+# Private local planning material - must never reach a public repository.
+.superpowers/
+docs/superpowers/
