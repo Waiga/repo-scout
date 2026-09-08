@@ -29,6 +29,9 @@ repo-scout report ./downloads/owner__repo
 `search` accepts `--limit` to cap the number of results. `download` accepts
 `--downloads-dir` to choose the clone destination.
 
+`repo-scout --version` prints the installed version. `python -m repo_scout` runs the same
+command from a source tree.
+
 Global options precede the command:
 
 ```bash
@@ -69,7 +72,11 @@ not a malware verdict. See Verdicts below.
 A report ends in one of three labels, or in no label at all. The labels are
 prioritization labels for human review, not safety judgments.
 
-- `USE`: useful signals are strong and static risk signals are low.
+- `USE`: the signals a maintained project usually carries are present, and the static
+  scan found nothing. For a local scan those signals are five yes/no checks — a README,
+  a licence, package metadata, a tests directory, a CI config — and **every one of them
+  is satisfied by an empty file or an empty directory**. `USE` is not a statement about
+  the code.
 - `INSPECT FIRST`: promising, but something needs a person to look at it.
 - `AVOID`: usefulness is low or static risk crossed the threshold.
 - `not established`: the evidence gathered does not single out any of the three. The
@@ -114,8 +121,22 @@ holding code the repository did not write — `node_modules`, `vendor`, `third_p
 dependency are not reported against the repository that vendored it.
 
 Each pattern is matched against a window of one line plus the next, never against a
-whole file, and at most three findings per rule per file are reported. Every finding
-carries the line it was found on and the text that actually matched.
+whole file, and at most three findings per rule per file are reported. Within a window
+only the first match of each rule is taken, so two secrets on one line are one finding.
+Every finding carries the line it was found on and the text that actually matched.
+
+A finding in documentation or a test fixture is reported **one severity step lower** than
+the same finding in the repository's own source, and its message says which. A project's
+own documented `curl … | bash` install line scored `critical` drives `AVOID` by itself,
+which reports the genre of a file rather than the risk of a repository. The relief is one
+step and one step only, so a directory name cannot be used to hide anything: two such
+findings still reach `INSPECT FIRST`, and the identical files under `src/` reach `AVOID`.
+
+Directories holding code the repository did not write are skipped entirely — and that is
+a complete blind spot, not a reduced one. Nothing in `node_modules`, `vendor`,
+`third_party`, `target`, `dist`, `build`, `out` or a virtual environment is examined by
+any rule. Text files over 64 MB are not read either; that skip is reported as a
+`file-not-read` finding rather than passed over in silence.
 
 Structurally out of reach, and reported as such rather than as a clean result:
 compiled binaries, encrypted or generated payloads, anything a shallow clone omits
@@ -162,49 +183,59 @@ of the same measurement, not two different ones.
 | Bytes of the median repository opened | 8.3% | **66.8%** |
 | Files of the median repository opened | 23.5% | **86.8%** |
 | Repositories where it opened nothing at all | 15 | **0** |
-| Verdicts it could produce | `AVOID`, or none | **all four** |
-| `obfuscated-execution` findings | 98, in 44 repositories | **6, in 4** |
-| `possible-exfiltration` findings | 210, in 58 repositories | **19, in 6** |
-| Repositories reported as having no tests | 230 | **154** |
-| Repositories reported as having no package metadata | 230 | **105** |
-| Crashes, hangs, timeouts | 0 | 0 |
-| Slowest single repository | 31.8 s | 25.5 s |
+| Verdicts produced across the 385 | `AVOID` 132, no label 253 | **`USE` 179, `AVOID` 122, `INSPECT FIRST` 84** |
+| Verdicts reachable at all, by enumeration rather than by corpus | 2 of 4 | **4 of 4** |
+| `obfuscated-execution` findings | 98, in 44 repositories | **11, in 5** |
+| `possible-exfiltration` findings | 210, in 58 repositories | **42, in 11** |
+| Repositories reported as having no tests | 230 | **147** |
+| Repositories reported as having no package metadata | 230 | **100** |
+| Crashes, hangs or timeouts on this corpus | 0 | 0 |
+| Slowest single repository | 31.8 s | 25.4 s |
 
 Two rules went the other way, and that is the point of them: `remote-shell` rose from 79
-findings to 329 and `secret-like-string` from 42 to 273, because v0.1 did not open the
+findings to 365 and `secret-like-string` from 42 to 273, because v0.1 did not open the
 files those patterns live in. Sampling them showed most of the new ones are real matches
 in documentation and test fixtures — a project's own `curl … | bash` install line in its
-README, Amazon's own published example access key in a guide, a scanner's own
-rule fixtures. **66% of all
-findings now sit in documentation or a test fixture**, and those are reported at a lower
-severity that says so, because a documented installer scored `critical` drives `AVOID` on
-its own and that is the tool reporting the genre of a file rather than the risk of a
-repository.
+README, Amazon's published example access key in a guide, a scanner's own rule fixtures.
+**469 of 740 findings (63.4%) are reported at a reduced severity** for exactly that
+reason, because a documented installer scored `critical` drives `AVOID` on its own and
+that is the tool reporting the genre of a file rather than the risk of a repository.
 
-After that weighting: 69% of the 385 repositories produce no findings at all, the median
-repository produces none, and the verdicts fall 50.6% `USE`, 20.0% `INSPECT FIRST`,
-29.4% `AVOID`. The security-research and malware-analysis strata skew hardest towards
+After that weighting: 68% of the 385 repositories produce no findings at all, the median
+repository produces none, and the verdicts fall 46.5% `USE`, 21.8% `INSPECT FIRST`,
+31.7% `AVOID`. The security-research and malware-analysis strata skew hardest towards
 `AVOID`, which is the expected result for repositories that contain attack strings on
 purpose, and the reason `AVOID` is a prioritization label rather than an accusation.
+
+`not established` was produced for none of the 385. A local scan can now settle every
+signal it scores, so it withholds a label only when a directory cannot be read — which
+none of these had. That state is reachable, not common.
 
 ### What it misses
 
 The corpus measures what the tool says about ordinary repositories. It cannot measure
 what the tool fails to say, because none of those 385 repositories is known to contain
 anything hostile. That was measured separately, by planting payloads whose detection is
-known in advance into 48 different file containers and 11 different positions in a file
-— ground truth by construction, so a miss is a false negative and not a judgement call.
+known in advance into 48 different file containers, 11 different positions in a file, and
+11 different directories — ground truth by construction, so a miss is a false negative
+and not a judgement call.
 
-**v0.1 detected 17 of 48 containers. v0.2 detects 48 of 48.** The 31 it missed included
-every compiled language, `.tsx` and `.jsx`, notebooks, Markdown, extensionless shell
-scripts named `install` or `configure`, and shell dotfiles. It also missed any UTF-16
-file entirely, and missed `requests.post(url, data=os.environ)` — the idiomatic Python
-form — because the rule required the credential to appear before the network call.
+**v0.1 detected 17 of the 48 containers. v0.2 detects 48 of 48.** The 31 it missed
+included every compiled language, `.tsx` and `.jsx`, notebooks, Markdown, extensionless
+shell scripts named `install` or `configure`, and shell dotfiles. It also missed any
+UTF-16 file entirely, and missed `requests.post(url, data=os.environ)` — the idiomatic
+Python form — because the rule required the credential to appear before the network call.
 
-This says nothing about patterns the rules were never written to catch, and it is not a
-claim that the tool finds a determined attacker's code. No claim is made that a reader
-who runs this tool makes a better adoption decision; that has not been measured, and
-there is no oracle here that could measure it.
+The directory axis is the one that does not come out clean, and it is by design: of the
+11 locations, **6 are not scanned at all** — `build`, `dist`, `vendor`, `node_modules`,
+`target`, `third_party` and the rest of the ignore list. A payload placed in any of them
+is invisible to every rule. That is the right default for judging a repository by code it
+actually wrote, and it is a complete blind spot rather than a reduced one.
+
+None of this says anything about patterns the rules were never written to catch, and it
+is not a claim that the tool finds a determined attacker's code. No claim is made that a
+reader who runs this tool makes a better adoption decision; that has not been measured,
+and there is no oracle here that could measure it.
 
 ## Run tests
 

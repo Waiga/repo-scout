@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -11,7 +12,7 @@ from .github_client import GitHubClient, GitHubClientError
 from . import __version__
 from .models import EvidenceState, RepoReport, RepoSignals, RepoSummary
 from .report import LIMITATION, risk_text, usefulness_text, verdict_text, write_report
-from .scanner import scan_path
+from .scanner import IGNORED_DIRS, scan_path
 from .scoring import score_repository
 
 
@@ -168,7 +169,12 @@ def run_inspect_command(repo_name: str, client: GitHubClient, reports_dir: Path,
     # No query: `inspect` names one repository rather than searching for one.
     # Passing `repo_name` here matched the repository's name against itself and
     # reported a query match nobody asked for.
-    score = score_repository(repo, signals, [], query_accepted=False)
+    # `inspect` fetches four files and asks about nothing else, so tests and
+    # releases are outside its scale rather than unknown within it.
+    score = score_repository(
+        repo, signals, [], query_accepted=False,
+        signals_observed=INSPECT_SIGNALS,
+    )
     report = RepoReport(repo=repo, signals=signals, findings=[], score=score)
     md_path, html_path = write_report(report, reports_dir)
     print_summary(report)
@@ -244,7 +250,8 @@ def run_scan_command(path: Path, reports_dir: Path) -> int:
     # threshold and reported that ceiling as a property of the scanned
     # repository.
     score = score_repository(
-        repo, signals, findings, scanned=True, metadata=False, query_accepted=False
+        repo, signals, findings, scanned=True, metadata=False,
+        query_accepted=False, signals_observed=LOCAL_SIGNALS,
     )
     report = RepoReport(repo=repo, signals=signals, findings=findings, score=score)
     md_path, html_path = write_report(report, reports_dir)
@@ -262,6 +269,13 @@ def print_summary(report: RepoReport) -> None:
     for reason in report.score.reasons[:5]:
         print(f"- {reason}")
     print(LIMITATION)
+
+
+# Exactly what `_fetch_signals` below requests. Kept beside it so the two
+# cannot drift apart.
+INSPECT_SIGNALS = frozenset(
+    {"has_readme", "has_license", "has_ci", "has_package_metadata"}
+)
 
 
 def _fetch_signals(client: GitHubClient, repo: RepoSummary) -> RepoSignals:
@@ -332,6 +346,40 @@ _LICENCE_NAMES = ("license", "licence", "copying", "unlicense")
 _SIGNAL_DEPTH = 3
 
 
+def _walk_shallow(path: Path, depth: int):
+    """Walk `path` to `depth` levels, skipping non-source directories.
+
+    Yields `(directory, subdirectory names, file names)` and finally a single
+    boolean saying whether anything could not be read.
+
+    `pathlib.Path.glob` was used here, and it swallows `PermissionError`
+    during traversal: an unreadable subtree came back as no matches, which the
+    caller then reported as `absent`. `os.walk` with an `onerror` callback is
+    the only form that can tell "looked and it is not there" from "could not
+    look", which is the distinction this whole tool is built on.
+
+    `IGNORED_DIRS` is applied so that a dependency's `package.json` under
+    `node_modules/`, or a vendored `CMakeLists.txt`, is not counted as the
+    repository's own evidence.
+    """
+    blocked = False
+
+    def note(_exc):
+        nonlocal blocked
+        blocked = True
+
+    root_depth = len(path.parts)
+    for dirpath, dirnames, filenames in os.walk(path, onerror=note):
+        here = Path(dirpath)
+        level = len(here.parts) - root_depth
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in IGNORED_DIRS and level + 1 <= depth
+        ]
+        yield here, dirnames, filenames
+    yield blocked
+
+
 def _named_at_top(path: Path, stems: tuple[str, ...]) -> bool | None:
     """Case-insensitive stem match at the top level, plus a `docs/` fallback.
 
@@ -345,72 +393,64 @@ def _named_at_top(path: Path, stems: tuple[str, ...]) -> bool | None:
         if not parent.exists():
             continue
         try:
-            entries = list(parent.iterdir())
+            entries = list(os.scandir(parent))
         except OSError:
             blocked = True
             continue
         for entry in entries:
-            if entry.is_file() and entry.name.lower().split(".")[0] in stems:
+            if not entry.is_file():
+                continue
+            name = entry.name.lower()
+            stem = name.split(".")[0]
+            if stem not in stems:
+                continue
+            # A Python module named `license.py` is not a licence. Only a
+            # plain file, or one of the extensions a licence or readme is
+            # actually written in, counts.
+            suffix = name[len(stem):]
+            if suffix in ("", ".md", ".rst", ".txt", ".adoc", ".html"):
                 return True
     return None if blocked else False
 
 
 def _marker_exists(path: Path, markers: tuple[str, ...]) -> bool | None:
-    blocked = False
     for marker in markers:
         if (path / marker).exists():
             return True
-    # Below the top level: a monorepo keeps its package files one or two
-    # directories down, and a Java project keeps its tests three down.
-    for marker in markers:
-        name = marker.rsplit("/", 1)[-1]
-        for depth in range(2, _SIGNAL_DEPTH + 1):
-            pattern = "/".join(["*"] * (depth - 1) + [name])
-            try:
-                if next(path.glob(pattern), None) is not None:
-                    return True
-            except OSError:
-                blocked = True
-                continue
+    names = {m.rsplit("/", 1)[-1] for m in markers}
+    blocked = False
+    for item in _walk_shallow(path, _SIGNAL_DEPTH):
+        if isinstance(item, bool):
+            blocked = item
+            break
+        _here, _dirs, files = item
+        if names & set(files):
+            return True
     return None if blocked else False
 
 
 def _has_tests(path: Path) -> bool | None:
+    colocated = ("_test.go", "_test.py", "_test.rs", ".test.ts", ".test.js",
+                 ".spec.ts", ".spec.js", "Test.java", "Tests.cs")
     blocked = False
-    try:
-        entries = list(path.iterdir())
-    except OSError:
-        return None
-    for entry in entries:
-        name = entry.name.lower()
-        if entry.is_dir() and name in _TEST_DIR_NAMES:
+    for item in _walk_shallow(path, _SIGNAL_DEPTH):
+        if isinstance(item, bool):
+            blocked = item
+            break
+        here, dirs, files = item
+        if any(d.lower() in _TEST_DIR_NAMES for d in dirs):
             return True
-        if entry.is_file() and (name.startswith("test_") or name.endswith(("_test.go", "_test.py", ".test.js", ".test.ts", ".spec.js", ".spec.ts"))):
-            return True
-    for hint in _TEST_PATH_HINTS:
-        try:
-            if next(path.glob(f"*/{hint.rstrip('/')}"), None) is not None:
+        for name in files:
+            if name.lower().startswith("test_") or name.endswith(colocated):
                 return True
-            if next(path.glob(f"*/*/{hint.rstrip('/')}"), None) is not None:
-                return True
-        except OSError:
-            blocked = True
-            continue
-    # Go, Rust and JavaScript keep tests beside the code they test rather than
-    # in a directory of their own, so a directory-name search alone reports
-    # `absent` for most of two ecosystems.
-    for pattern in ("*_test.go", "*_test.py", "*_test.rs", "*.test.ts",
-                    "*.test.js", "*.spec.ts", "*Test.java", "*Tests.cs"):
-        for depth in range(1, _SIGNAL_DEPTH + 1):
-            prefix = "/".join(["*"] * (depth - 1))
-            glob = f"{prefix}/{pattern}" if prefix else pattern
-            try:
-                if next(path.glob(glob), None) is not None:
-                    return True
-            except OSError:
-                blocked = True
-                continue
     return None if blocked else False
+
+
+# A local directory carries no release list, so `has_releases` is outside the
+# scale of a scan rather than unknown within it.
+LOCAL_SIGNALS = frozenset(
+    {"has_readme", "has_license", "has_tests", "has_ci", "has_package_metadata"}
+)
 
 
 def _local_signals(path: Path) -> RepoSignals:

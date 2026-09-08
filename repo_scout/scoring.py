@@ -23,6 +23,7 @@ def score_repository(
     scanned: bool = False,
     metadata: bool = True,
     query_accepted: bool = True,
+    signals_observed: frozenset[str] | None = None,
 ) -> ScoreResult:
     """Score a repository from the evidence actually gathered about it.
 
@@ -37,12 +38,15 @@ def score_repository(
     reported a shortfall the tool never measured as a property of the scanned
     repository.
     """
-    usefulness, reasons, observable = _usefulness(repo, signals, query, metadata)
-    ceiling, _, _ = _usefulness(repo, signals, query, metadata, unknown_as_present=True)
+    usefulness, reasons, observable = _usefulness(
+        repo, signals, query, metadata, signals_observed=signals_observed)
+    ceiling, _, _ = _usefulness(
+        repo, signals, query, metadata, unknown_as_present=True,
+        signals_observed=signals_observed)
     risk, risk_reasons = _risk(repo, signals, findings, metadata)
     verdict = _verdict(usefulness, ceiling, risk, scanned)
     blockers = [] if verdict else _verdict_blockers(
-        signals, query, metadata, scanned, query_accepted
+        signals, query, metadata, scanned, query_accepted, signals_observed
     )
     return ScoreResult(
         usefulness=usefulness,
@@ -62,7 +66,8 @@ def _usefulness(
     query: str,
     metadata: bool,
     unknown_as_present: bool = False,
-) -> tuple[int, list[str]]:
+    signals_observed: frozenset[str] | None = None,
+) -> tuple[int, list[str], int]:
     score = 0.0
     # `observable` is the share of the 100-point scale this run was in a
     # position to read at all. v0.1 scored every run out of a fixed 100
@@ -78,6 +83,19 @@ def _usefulness(
     # which is what makes the gap between them mean what it says.
     observable = 0.0
     freshness = _freshness(repo.pushed_at) if metadata else "unknown"
+
+    def attempted(name: str) -> bool:
+        """Whether this run tried to establish `name` at all.
+
+        A signal nobody requested is not unestablished evidence that could
+        turn out present -- it is outside the scale for this command, and it
+        belongs in neither the confirmed figure nor the ceiling. `inspect`
+        fetches four files and never asks about tests or releases; counting
+        those two as `unknown` widened its ceiling and then told the reader
+        that two signals "could not be established", about two requests that
+        were never made.
+        """
+        return signals_observed is None or name in signals_observed
 
     def counts(state: str) -> bool:
         """Whether `state` earns its points.
@@ -97,15 +115,20 @@ def _usefulness(
         observable += 30
 
     health = 0.0
-    health_weight = 0.3
-    if counts(signals.has_readme):
-        health += 0.3
+    health_weight = 0.0
+    if attempted("has_readme"):
+        health_weight += 0.3
+        if counts(signals.has_readme):
+            health += 0.3
     if metadata:
-        health_weight = 1.0
+        health_weight += 0.3
         if counts(freshness):
             health += 0.3
-        if counts(signals.has_releases):
-            health += 0.2
+        if attempted("has_releases"):
+            health_weight += 0.2
+            if counts(signals.has_releases):
+                health += 0.2
+        health_weight += 0.2
         if repo.open_issues <= 25:
             health += 0.2
     score += min(health, health_weight) * 20
@@ -126,24 +149,28 @@ def _usefulness(
         observable += 20
 
     setup = 0.0
-    if counts(signals.has_readme):
-        setup += 0.45
-    if counts(signals.has_package_metadata):
-        setup += 0.35
-    if counts(signals.has_license):
-        setup += 0.2
-    score += min(setup, 1.0) * 15
-    observable += 15
+    setup_weight = 0.0
+    for name, weight in (("has_readme", 0.45), ("has_package_metadata", 0.35),
+                         ("has_license", 0.2)):
+        if not attempted(name):
+            continue
+        setup_weight += weight
+        if counts(getattr(signals, name)):
+            setup += weight
+    score += min(setup, setup_weight) * 15
+    observable += 15 * setup_weight
 
     structure = 0.0
-    if counts(signals.has_tests):
-        structure += 0.4
-    if counts(signals.has_ci):
-        structure += 0.35
-    if counts(signals.has_package_metadata):
-        structure += 0.25
-    score += min(structure, 1.0) * 15
-    observable += 15
+    structure_weight = 0.0
+    for name, weight in (("has_tests", 0.4), ("has_ci", 0.35),
+                         ("has_package_metadata", 0.25)):
+        if not attempted(name):
+            continue
+        structure_weight += weight
+        if counts(getattr(signals, name)):
+            structure += weight
+    score += min(structure, structure_weight) * 15
+    observable += 15 * structure_weight
 
     normalised = (score / observable * 100) if observable else 0.0
     return (
@@ -252,6 +279,7 @@ def _verdict_blockers(
     metadata: bool,
     scanned: bool,
     query_accepted: bool,
+    signals_observed: frozenset[str] | None,
 ) -> list[str]:
     """Why no label was established, read off the run that produced it.
 
@@ -273,7 +301,11 @@ def _verdict_blockers(
         blockers.append("repository metadata is unavailable for a local path")
     if not scanned:
         blockers.append("no static scan was performed, so risk is unknown")
-    unknown = sum(1 for field in SIGNAL_FIELDS if getattr(signals, field) == "unknown")
+    unknown = sum(
+        1 for field in SIGNAL_FIELDS
+        if getattr(signals, field) == "unknown"
+        and (signals_observed is None or field in signals_observed)
+    )
     if unknown:
         noun = "signal" if unknown == 1 else "signals"
         blockers.append(f"{unknown} repository {noun} could not be established")
