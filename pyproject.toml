@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "repo-scout"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Inspect public repositories for usefulness and static risk evidence before adoption."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,3 +26,11 @@ repo-scout = "repo_scout.cli:main"
 
 [tool.setuptools]
 packages = ["repo_scout"]
+
+# One source of truth for the version, and one that is readable
+# without installing: `importlib.metadata` alone reported
+# `0+unknown` from a fresh clone, and in a zipapp reported
+# whatever happened to be installed in the environment rather than
+# the code being executed.
+[tool.setuptools.dynamic]
+version = { attr = "repo_scout.__version__" }
