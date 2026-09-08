@@ -89,11 +89,24 @@ def usefulness_text(score: ScoreResult) -> str:
     ceiling = score.usefulness_ceiling
     confirmed = f"{score.usefulness}/100"
     if ceiling is None or ceiling <= score.usefulness:
-        return confirmed
-    return (
-        f"{confirmed} confirmed, up to {ceiling}/100 if everything that could "
-        "not be established turns out present"
-    )
+        text = confirmed
+    else:
+        text = (
+            f"{confirmed} confirmed, up to {ceiling}/100 if everything that could "
+            "not be established turns out present"
+        )
+    # Both figures are percentages of the part of the scale this run could
+    # observe, not of a fixed 100. Saying which part that was is the difference
+    # between a score and a score somebody can check: a local scan reads no
+    # star count, so scoring it out of a scale containing one reported the
+    # command's blind spot as a shortfall of the repository.
+    observable = score.observable_scale
+    if observable is not None and observable < 100:
+        text += (
+            f" (scored over the {observable}% of the scale this run could "
+            "observe; the rest needs a command that reads it)"
+        )
+    return text
 
 
 def render_markdown(report: RepoReport) -> str:
@@ -201,8 +214,15 @@ def write_report(report: RepoReport, out_dir: Path | str) -> tuple[Path, Path]:
     slug = _slug(report.repo.full_name)
     md_path = root / f"{slug}.md"
     html_path = root / f"{slug}.html"
-    md_path.write_text(render_markdown(report), encoding="utf-8")
-    html_path.write_text(render_html(report), encoding="utf-8")
+    # `errors="backslashreplace"`: a filename whose bytes are not valid UTF-8
+    # reaches here as a surrogate, and `write_text` then raises
+    # UnicodeEncodeError -- a ValueError, which the caller's `except OSError`
+    # does not catch, so the command died with a traceback after the whole scan
+    # had already been paid for. The path is written in escaped form instead.
+    md_path.write_text(render_markdown(report), encoding="utf-8",
+                       errors="backslashreplace")
+    html_path.write_text(render_html(report), encoding="utf-8",
+                         errors="backslashreplace")
     return md_path, html_path
 
 

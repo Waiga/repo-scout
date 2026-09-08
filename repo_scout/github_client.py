@@ -7,6 +7,7 @@ import urllib.request
 import urllib.error
 from typing import Callable
 
+from . import __version__
 from .models import FileFetch, RepoSummary
 
 
@@ -77,7 +78,7 @@ class GitHubClient:
             url,
             headers={
                 "Accept": "application/vnd.github+json",
-                "User-Agent": "repo-scout/0.1",
+                "User-Agent": f"repo-scout/{__version__}",
             },
         )
 

