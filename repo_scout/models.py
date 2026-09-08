@@ -68,6 +68,11 @@ class ScoreResult:
     # repository whose evidence is unknown stops reading like one confirmed to
     # lack the same files. `None` means the caller supplied no ceiling.
     usefulness_ceiling: int | None = None
+    # How many of the 100 points of the usefulness scale this run was able to
+    # observe at all. `usefulness` and `usefulness_ceiling` are percentages of
+    # this, not of a fixed 100, so a run that could read half the scale is not
+    # penalised for the half it structurally could not reach.
+    observable_scale: int | None = None
 
 
 @dataclass(frozen=True)

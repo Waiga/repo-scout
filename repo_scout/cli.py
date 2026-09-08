@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .cache import FileCache
 from .github_client import GitHubClient, GitHubClientError
+from . import __version__
 from .models import EvidenceState, RepoReport, RepoSignals, RepoSummary
 from .report import LIMITATION, risk_text, usefulness_text, verdict_text, write_report
 from .scanner import scan_path
@@ -39,6 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
             "establish, and its verdicts are prioritization labels for human "
             "review."
         ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"repo-scout {__version__}",
+        help="print the installed version and exit",
     )
     parser.add_argument(
         "--reports-dir",
@@ -161,7 +168,7 @@ def run_inspect_command(repo_name: str, client: GitHubClient, reports_dir: Path,
     # No query: `inspect` names one repository rather than searching for one.
     # Passing `repo_name` here matched the repository's name against itself and
     # reported a query match nobody asked for.
-    score = score_repository(repo, signals, [])
+    score = score_repository(repo, signals, [], query_accepted=False)
     report = RepoReport(repo=repo, signals=signals, findings=[], score=score)
     md_path, html_path = write_report(report, reports_dir)
     print_summary(report)
@@ -236,7 +243,9 @@ def run_scan_command(path: Path, reports_dir: Path) -> int:
     # anything that was read. Scoring them held every local scan below the AVOID
     # threshold and reported that ceiling as a property of the scanned
     # repository.
-    score = score_repository(repo, signals, findings, scanned=True, metadata=False)
+    score = score_repository(
+        repo, signals, findings, scanned=True, metadata=False, query_accepted=False
+    )
     report = RepoReport(repo=repo, signals=signals, findings=findings, score=score)
     md_path, html_path = write_report(report, reports_dir)
     print_summary(report)
@@ -295,19 +304,136 @@ def _local_target_name(path: Path) -> str:
     return path.resolve().name or "local repository"
 
 
+# Where each signal can legitimately live. v0.1 looked only at the top level,
+# case-sensitively, at four package files and at GitHub Actions alone -- so a
+# Java monorepo with `src/test/java` and a `pom.xml`, or any project using
+# GitLab CI, was reported `absent` on evidence nobody had looked for. The
+# project's own doctrine is that `absent` means confirmed to lack, so a
+# too-narrow search is not a small inaccuracy: it is the one claim the tool
+# says it will never make.
+_TEST_DIR_NAMES = {"test", "tests", "spec", "specs", "__tests__", "testing"}
+_TEST_PATH_HINTS = ("src/test", "src/tests", "test/", "tests/", "spec/")
+_CI_MARKERS = (
+    ".github/workflows", ".gitlab-ci.yml", ".circleci", "Jenkinsfile",
+    "azure-pipelines.yml", ".travis.yml", ".drone.yml", "appveyor.yml",
+    ".woodpecker.yml", "bitbucket-pipelines.yml", ".buildkite",
+)
+_PACKAGE_MARKERS = (
+    "package.json", "pyproject.toml", "setup.py", "setup.cfg", "Cargo.toml",
+    "go.mod", "pom.xml", "build.gradle", "build.gradle.kts", "composer.json",
+    "Gemfile", "mix.exs", "pubspec.yaml", "Package.swift", "CMakeLists.txt",
+    "build.sbt", "deno.json", "requirements.txt", "Makefile.PL", "DESCRIPTION",
+)
+_README_NAMES = ("readme",)
+_LICENCE_NAMES = ("license", "licence", "copying", "unlicense")
+
+# How deep to look for a marker that is not at the top level. Two levels covers
+# `packages/web/package.json` and `src/test/java` without walking a whole tree.
+_SIGNAL_DEPTH = 3
+
+
+def _named_at_top(path: Path, stems: tuple[str, ...]) -> bool | None:
+    """Case-insensitive stem match at the top level, plus a `docs/` fallback.
+
+    `None` when a directory that had to be read could not be. Returning False
+    there would report `absent`, and by this project's own doctrine `absent`
+    means confirmed to lack -- a claim nobody is entitled to make about a
+    directory they could not open.
+    """
+    blocked = False
+    for parent in (path, path / "docs", path / ".github"):
+        if not parent.exists():
+            continue
+        try:
+            entries = list(parent.iterdir())
+        except OSError:
+            blocked = True
+            continue
+        for entry in entries:
+            if entry.is_file() and entry.name.lower().split(".")[0] in stems:
+                return True
+    return None if blocked else False
+
+
+def _marker_exists(path: Path, markers: tuple[str, ...]) -> bool | None:
+    blocked = False
+    for marker in markers:
+        if (path / marker).exists():
+            return True
+    # Below the top level: a monorepo keeps its package files one or two
+    # directories down, and a Java project keeps its tests three down.
+    for marker in markers:
+        name = marker.rsplit("/", 1)[-1]
+        for depth in range(2, _SIGNAL_DEPTH + 1):
+            pattern = "/".join(["*"] * (depth - 1) + [name])
+            try:
+                if next(path.glob(pattern), None) is not None:
+                    return True
+            except OSError:
+                blocked = True
+                continue
+    return None if blocked else False
+
+
+def _has_tests(path: Path) -> bool | None:
+    blocked = False
+    try:
+        entries = list(path.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        name = entry.name.lower()
+        if entry.is_dir() and name in _TEST_DIR_NAMES:
+            return True
+        if entry.is_file() and (name.startswith("test_") or name.endswith(("_test.go", "_test.py", ".test.js", ".test.ts", ".spec.js", ".spec.ts"))):
+            return True
+    for hint in _TEST_PATH_HINTS:
+        try:
+            if next(path.glob(f"*/{hint.rstrip('/')}"), None) is not None:
+                return True
+            if next(path.glob(f"*/*/{hint.rstrip('/')}"), None) is not None:
+                return True
+        except OSError:
+            blocked = True
+            continue
+    # Go, Rust and JavaScript keep tests beside the code they test rather than
+    # in a directory of their own, so a directory-name search alone reports
+    # `absent` for most of two ecosystems.
+    for pattern in ("*_test.go", "*_test.py", "*_test.rs", "*.test.ts",
+                    "*.test.js", "*.spec.ts", "*Test.java", "*Tests.cs"):
+        for depth in range(1, _SIGNAL_DEPTH + 1):
+            prefix = "/".join(["*"] * (depth - 1))
+            glob = f"{prefix}/{pattern}" if prefix else pattern
+            try:
+                if next(path.glob(glob), None) is not None:
+                    return True
+            except OSError:
+                blocked = True
+                continue
+    return None if blocked else False
+
+
 def _local_signals(path: Path) -> RepoSignals:
+    # Probe the root deliberately, outside the per-marker error handling below.
+    # Those handlers exist so that one unreadable subdirectory does not stop the
+    # walk; if they also swallowed an unreadable ROOT, the command would report
+    # every signal `absent` and no findings for a directory it never opened --
+    # an absence claim about a scan that did not happen. `run_scan_command`
+    # turns the OSError into a message and exit code 1.
+    list(path.iterdir())
     return RepoSignals(
-        has_readme=_state(any(path.glob("README*"))),
-        has_license=_state(any(path.glob("LICENSE*"))),
-        has_tests=_state(any(p.name.startswith("test") or p.name == "tests" for p in path.iterdir())),
-        has_ci=_state((path / ".github" / "workflows").exists()),
-        has_package_metadata=_state(
-            any((path / name).exists() for name in ("package.json", "pyproject.toml", "Cargo.toml", "go.mod"))
-        ),
+        has_readme=_state(_named_at_top(path, _README_NAMES)),
+        has_license=_state(_named_at_top(path, _LICENCE_NAMES)),
+        has_tests=_state(_has_tests(path)),
+        has_ci=_state(_marker_exists(path, _CI_MARKERS)),
+        has_package_metadata=_state(_marker_exists(path, _PACKAGE_MARKERS)),
     )
 
 
-def _state(observed: bool) -> EvidenceState:
+def _state(observed: bool | None) -> EvidenceState:
+    """`None` means the search could not be completed, which is `unknown`."""
+    if observed is None:
+        return "unknown"
     return "present" if observed else "absent"
 
 

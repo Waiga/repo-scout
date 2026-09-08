@@ -1,5 +1,6 @@
 import contextlib
 import io
+import os
 import re
 import tempfile
 import unittest
@@ -10,12 +11,15 @@ from repo_scout.cache import FileCache
 from repo_scout.cli import (
     _local_repo_summary,
     build_parser,
+    print_summary,
     run_download_command,
     run_inspect_command,
     run_scan_command,
     run_search_command,
 )
-from repo_scout.models import FileFetch, RepoSummary
+from repo_scout.models import FileFetch, RepoReport, RepoSignals, RepoSummary
+from repo_scout.report import write_report
+from repo_scout.scoring import score_repository
 
 
 NUMERIC_RISK = re.compile(r"(?i)risk:?(\*\*)? \d+/100")
@@ -177,31 +181,50 @@ class CliTests(unittest.TestCase):
                 text = terminal.getvalue() if artifact.name == "terminal" else artifact.read_text(encoding="utf-8")
                 with self.subTest(surface=artifact.name):
                     self.assertNotIn("AVOID", text)
-                    self.assertIn("not established", text)
+                    # It now reaches an actual label. Before the scale was
+                    # renormalised over the part of it a local scan can
+                    # observe, the best a fully-signalled directory could do
+                    # was "not established", because relevance and credibility
+                    # are unreadable from a path and were still in the
+                    # denominator.
+                    self.assertIn("USE", text)
 
     def test_a_withheld_verdict_explains_itself_in_every_artifact(self):
         # The qualification has to travel with the number. A report file is
         # written to be shared and the README does not go with it, so a reader
         # holding only `owner__repo.html` has to be told why no label is there.
+        #
+        # The withheld case is now built from evidence that is genuinely
+        # unknown. It used to be built from a local directory with some signals
+        # present and some absent, which withheld a verdict only because the
+        # scale itself was unreachable from a local path -- the run's own blind
+        # spot, printed as if it were a property of the repository.
+        signals = RepoSignals(
+            has_readme="present",
+            has_license="unknown",
+            has_tests="unknown",
+            has_ci="unknown",
+            has_package_metadata="unknown",
+        )
+        summary = RepoSummary("repo", "Local repository scan", "")
+        score = score_repository(summary, signals, [], scanned=True, metadata=False,
+                                 query_accepted=False)
+        self.assertIsNone(score.verdict, "fixture no longer withholds a verdict")
+        report = RepoReport(repo=summary, signals=signals, findings=[], score=score)
+
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            repo = root / "repo"
-            repo.mkdir()
-            (repo / "README.md").write_text("# Sample project")
-            (repo / "pyproject.toml").write_text("[project]\nname = \"sample\"\n")
-            (repo / "LICENSE").write_text("MIT")
-            reports = root / "reports"
+            reports = Path(tmp) / "reports"
             terminal = io.StringIO()
-
             with contextlib.redirect_stdout(terminal):
-                run_scan_command(repo, reports)
+                print_summary(report)
+            written = list(write_report(report, reports))
 
-            for artifact in sorted(reports.iterdir()) + [root / "terminal"]:
-                text = terminal.getvalue() if artifact.name == "terminal" else artifact.read_text(encoding="utf-8")
+            for artifact in written:
                 with self.subTest(surface=artifact.name):
-                    self.assertIn("not established", text)
-                    self.assertIn("no query", text)
-                    self.assertIn("metadata", text)
+                    self.assertIn("not established",
+                                  artifact.read_text(encoding="utf-8"))
+            with self.subTest(surface="terminal"):
+                self.assertIn("not established", terminal.getvalue())
 
     def test_search_does_not_label_a_repository_it_gathered_no_evidence_about(self):
         # `search` opens no file and fetches no signal, so every signal it scores

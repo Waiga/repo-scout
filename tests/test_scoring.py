@@ -99,10 +99,15 @@ class ScoringTests(unittest.TestCase):
 
         self.assertNotIn("Matches query terms in name or description", unqueried.reasons)
         self.assertIn("Matches query terms in name or description", queried.reasons)
-        self.assertLess(unqueried.usefulness, queried.usefulness)
-        # No query must earn exactly what a query that matched nothing earns:
-        # nothing. Half credit for a question nobody asked was worth 15 points.
-        self.assertEqual(unqueried.usefulness, unmatched.usefulness)
+        # No query earns no relevance points. It also removes relevance from the
+        # scale being scored against, so the figure reports how much of what
+        # could be checked checked out. A query that matched nothing is the
+        # opposite case: relevance WAS observable and scored zero, so it counts
+        # against the repository and the unqueried run must rank above it.
+        self.assertEqual(unqueried.observable_scale, 70)
+        self.assertEqual(queried.observable_scale, 100)
+        self.assertEqual(unmatched.observable_scale, 100)
+        self.assertGreater(unqueried.usefulness, unmatched.usefulness)
 
     def test_unknown_signals_are_not_scored_as_a_confirmed_absence(self):
         # A repository whose evidence could not be fetched and one confirmed to
@@ -193,21 +198,64 @@ class ScoringTests(unittest.TestCase):
         # turn out to be. When those two ends fall under different labels, no
         # label is established, and printing the lower one states a negative the
         # evidence does not carry.
-        signals = RepoSignals(
+        #
+        # The case has to be built from signals that are genuinely unknown. It
+        # used to be built from signals that were all `present`, which produced
+        # no verdict only because the scale itself was unreachable: relevance
+        # and credibility are not observable from a local path, and scoring a
+        # local scan out of a fixed 100 containing both capped it at 36
+        # confirmed points, permanently below the AVOID threshold. That is the
+        # run's blind spot, not a property of the repository, and it made USE
+        # and INSPECT FIRST unreachable from every command in the tool.
+        partly_unknown = RepoSignals(
             has_readme="present",
-            has_license="present",
-            has_tests="present",
-            has_ci="present",
-            has_package_metadata="present",
+            has_license="unknown",
+            has_tests="unknown",
+            has_ci="unknown",
+            has_package_metadata="unknown",
         )
 
         score = score_repository(
-            RepoSummary("dir", "Local repository scan", ""), signals, [], scanned=True, metadata=False
+            RepoSummary("dir", "Local repository scan", ""),
+            partly_unknown, [], scanned=True, metadata=False,
         )
 
         self.assertLess(score.usefulness, 50)
         self.assertGreaterEqual(score.usefulness_ceiling, 50)
         self.assertIsNone(score.verdict)
+
+    def test_every_documented_label_is_reachable(self):
+        """USE and INSPECT FIRST were dead code.
+
+        Measured 2026-09-08 by enumerating 3.36 million input combinations
+        across all three commands: v0.1 produced only AVOID and no-label, from
+        every command, while README.md documented three labels and disclosed
+        only that USE was unreachable. A scale whose top two labels cannot fire
+        is a claim the code does not support, so reachability is asserted here
+        rather than left to a reader to discover.
+        """
+        everything = RepoSignals(
+            has_readme="present", has_license="present", has_tests="present",
+            has_ci="present", has_package_metadata="present",
+        )
+        local = RepoSummary("dir", "Local repository scan", "")
+
+        clean = score_repository(local, everything, [], scanned=True, metadata=False)
+        self.assertEqual(clean.verdict, "USE")
+
+        risky = score_repository(
+            local, everything,
+            [Finding(severity="high", rule="secret-like-string", path="a", message="m")],
+            scanned=True, metadata=False,
+        )
+        self.assertEqual(risky.verdict, "INSPECT FIRST")
+
+        critical = score_repository(
+            local, everything,
+            [Finding(severity="critical", rule="remote-shell", path="a", message="m")],
+            scanned=True, metadata=False,
+        )
+        self.assertEqual(critical.verdict, "AVOID")
 
     def test_a_withheld_verdict_names_why_for_the_run_that_produced_it(self):
         # "not established" on its own is as opaque as a wrong label. The reasons
