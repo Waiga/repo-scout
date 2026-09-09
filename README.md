@@ -180,7 +180,8 @@ The manifest also names what a third party cannot currently reproduce, and why.
 Version 0.1 had never been run against a repository it did not author. Version 0.2 was
 run against **385 real public repositories**, cloned on 8 September 2026 and held frozen,
 across eleven primary languages plus security-research, malware-analysis,
-documentation-only, monorepo, dotfile and non-English strata. Both versions were run over
+documentation-only, dotfile, non-English, small, large, installer and
+test-fixture strata. Both versions were run over
 the same frozen corpus with the same script, so every figure below is a before and after
 of the same measurement, not two different ones.
 

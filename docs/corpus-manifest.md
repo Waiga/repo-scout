@@ -71,12 +71,12 @@ committed file, not from the requested sizes:
 
 27 distinct primary languages are represented, the eleven queried for plus
 sixteen that arrived through the topic-based strata; 34 repositories have no
-primary language at all. The README describes the strata as "eleven primary
+primary language at all. The README originally described the strata as "eleven primary
 languages plus security-research, malware-analysis, documentation-only,
-monorepo, dotfile and non-English strata". The table above is the authority on
-what the strata actually are. There is no stratum named `monorepo`; the strata
-the README's list does not name are `small`, `large`, `installer` and
-`testfixtures`.
+monorepo, dotfile and non-English strata". There is no stratum named `monorepo`,
+and that list omitted `small`, `large`, `installer` and `testfixtures`. The
+README was corrected on 9 September 2026 to match the table above, which remains
+the authority on what the strata actually are.
 
 **How they were fetched.** `git clone --depth 1 --no-tags` per repository, run
 eight at a time. All 385 clones succeeded; the clone status log recorded `OK`
