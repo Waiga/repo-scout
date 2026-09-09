@@ -171,6 +171,12 @@ than reporting no findings.
 
 ## Measured against real repositories
 
+**How this was measured.** Which 385 repositories, how they were selected, what
+was and was not recorded about them, and which result file every figure below
+comes from: [`docs/corpus-manifest.md`](docs/corpus-manifest.md). The repository
+list itself is [`docs/corpus/repositories.tsv`](docs/corpus/repositories.tsv).
+The manifest also names what a third party cannot currently reproduce, and why.
+
 Version 0.1 had never been run against a repository it did not author. Version 0.2 was
 run against **385 real public repositories**, cloned on 8 September 2026 and held frozen,
 across eleven primary languages plus security-research, malware-analysis,
