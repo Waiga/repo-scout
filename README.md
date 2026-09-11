@@ -16,6 +16,10 @@ Repo Scout declares support for Python 3.11 or newer and has no runtime dependen
 python3 -m pip install --no-deps .
 ```
 
+The command is `repo-scout`. On the Python Package Index the project is named
+`kick-the-tyres`, because the plain name belongs to somebody else's project and was
+left alone. Same tool, same command, different name on the index.
+
 ## Commands
 
 ```bash
